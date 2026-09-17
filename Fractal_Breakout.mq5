@@ -10,7 +10,6 @@
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
-#include <Tools\DateTime.mqh>
 
 //--- Enums
 enum FractalType
@@ -19,16 +18,17 @@ enum FractalType
    fractal_low  = 1
   };
 
-//--- Named trading session for the overlap filter.
-//--- Hours below are approximate MT5 server-time windows for a typical
-//--- GMT+2/+3 broker. If your broker's server time offset differs, edit
-//--- the hour constants inside GetNamedSessionHours().
-enum ENUM_SESSION_NAME
+enum DrawdownBasis
   {
-   SESSION_SYDNEY  = 0,   // Sydney
-   SESSION_TOKYO   = 1,   // Tokyo / Asia
-   SESSION_LONDON  = 2,   // London
-   SESSION_NEWYORK = 3    // New York
+   dd_peak_equity = 0,   // From peak equity (all-time)
+   dd_daily_loss  = 1    // Loss within the current day
+  };
+
+//--- Only the selected method's parameter group is read; optimize one at a time.
+enum TrendMethod
+  {
+   trend_regression = 0,   // Linear regression slope
+   trend_efficiency = 1    // Kaufman Efficiency Ratio
   };
 
 //--- Structs
@@ -42,20 +42,6 @@ struct Fractal
                      isSet(IsSet),
                      value(Value),
                      time(Time) {}
-  };
-
-struct SessionTime
-  {
-   bool              isSessionSet;
-   datetime          start;
-   datetime          end;
-   datetime          strategyStart;
-
-                     SessionTime(bool IsSessionSet=false, datetime Start=0, datetime End=0, datetime StrategyStart=0):
-                     isSessionSet(IsSessionSet),
-                     start(Start),
-                     strategyStart(StrategyStart),
-                     end(End) {}
   };
 
 struct DirectionStats
@@ -92,26 +78,19 @@ struct ExpertStats
 
 struct VisualObjects
   {
-   bool              isSession;
    bool              isUpFractal;
    bool              isDnFractal;
 
-                     VisualObjects(bool IsSession=false, bool IsUpFractal=false, bool IsDnFractal=false):
-                     isSession(IsSession),
+                     VisualObjects(bool IsUpFractal=false, bool IsDnFractal=false):
                      isUpFractal(IsUpFractal),
                      isDnFractal(IsDnFractal) {}
   };
 
 //--- Input definition
-input group    "Start Time"
-input int      InpStartHour               = 9;        // Start Hour (0 - 23)
-input int      InpStartMin                = 0;        // Start Min (0 - 59)
-input group    "End Time"
-input int      InpEndHour                 = 18;       // End Hour (0 - 23)
-input int      InpEndMin                  = 45;       // End Min (0 - 59)
 input group    "Trade Parameters"
 input double   InpFixedLot                = 0.01;     // Fixed Lot Size
 input int      InpAtrPeriod               = 14;       // ATR Period
+input int      InpMaxOpenTrades           = 1;        // Max Open Positions (0 = unlimited)
 input group    "Strategy Parameters"
 input double   InpAtrPercent              = 15;       // ATR Percentage
 input double   InpTpMultiplier            = 10;       // TP Multiplier
@@ -123,10 +102,18 @@ input ENUM_TIMEFRAMES InpAdxTimeframe     = PERIOD_H1; // ADX Timeframe
 input int      InpAdxPeriod               = 14;       // ADX Period
 input double   InpAdxThreshold            = 25;       // ADX Threshold (min trend strength)
 input bool     InpAdxUseDirection         = true;     // Use +DI/-DI for Buy/Sell Direction
-input group    "MA Trend Filter (Higher TF)"
-input bool     InpUseMaFilter             = false;    // Use MA Trend Filter
-input ENUM_TIMEFRAMES InpMaTimeframe      = PERIOD_H4; // MA Timeframe
-input int      InpMaPeriod                = 200;      // MA Period
+input group    "Trend Direction Filter"
+input bool     InpUseTrendFilter          = false;    // Use Trend Direction Filter
+input TrendMethod InpTrendMethod          = trend_regression; // Trend Method
+input group    "Trend: Linear Regression"
+input ENUM_TIMEFRAMES InpTrendRegTimeframe = PERIOD_H1; // Regression Timeframe
+input int      InpTrendRegBars            = 24;       // Regression Bars N (~1 day on H1)
+input double   InpTrendRegMinSlope        = 0.05;     // Min Slope, ATR per bar
+input double   InpTrendRegMinR2           = 0.30;     // Min R-squared (0 = off)
+input group    "Trend: Efficiency Ratio"
+input ENUM_TIMEFRAMES InpTrendErTimeframe = PERIOD_H1; // Efficiency Timeframe
+input int      InpTrendErBars             = 24;       // Efficiency Bars N (~1 day on H1)
+input double   InpTrendErMinRatio         = 0.30;     // Min Efficiency Ratio (0 - 1)
 input group    "Volatility Filter (ATR Ratio)"
 input bool     InpUseVolatilityFilter     = false;    // Use Volatility Filter
 input ENUM_TIMEFRAMES InpVolAtrTimeframe  = PERIOD_D1; // Volatility ATR Timeframe
@@ -134,29 +121,39 @@ input int      InpVolAtrPeriod            = 14;       // Volatility ATR Period
 input int      InpVolAtrAvgPeriod         = 20;       // Volatility ATR Average Lookback (bars)
 input double   InpVolAtrRatioMin          = 1.0;      // Min ATR Ratio (current / average)
 input group    "Session Filter"
-input bool     InpUseSessionFilter        = false;    // Use Session Filter
-input int      InpSessionStartHour        = 8;        // Session Start Hour (0 - 23)
-input int      InpSessionStartMin         = 0;        // Session Start Min (0 - 59)
-input int      InpSessionEndHour          = 17;       // Session End Hour (0 - 23)
-input int      InpSessionEndMin           = 0;        // Session End Min (0 - 59)
-input group    "Session Overlap Filter"
-input bool     InpUseOverlapFilter        = false;         // Use Session Overlap Filter
-input ENUM_SESSION_NAME InpOverlapSessionA = SESSION_LONDON;  // Overlap Session A
-input ENUM_SESSION_NAME InpOverlapSessionB = SESSION_NEWYORK; // Overlap Session B
+input bool     InpUseSessionFilter        = false;    // Master switch: use session filter
+input bool     InpEnableASIA              = true;     // Enable ASIA (00:00-08:00 GMT)
+input bool     InpEnableLONDON            = true;     // Enable LONDON (08:00-16:00 GMT)
+input bool     InpEnableNEWYORK           = true;     // Enable NEWYORK (13:00-21:00 GMT)
+input bool     InpEnableOVERLAP           = true;     // Enable OVERLAP (13:00-16:00 GMT)
+input bool     InpSessionUseServerTime    = true;     // Time source: true=server TimeCurrent(), false=TimeGMT()
 input group    "Trailing Stop"
 input bool     InpUseTrailingStop         = true;     // Use Trailing Stop
 input double   InpTrailAtrPercent         = 10;       // Trailing Stop ATR Percent
+input group    "Drawdown Guard"
+input double   InpMaxDrawdownUSD          = 0;        // Max Drawdown, deposit currency (0 = off)
+input DrawdownBasis InpDrawdownBasis      = dd_peak_equity; // Drawdown Basis
+input group    "Timed Profit Exit"
+input bool     InpUseProfitClose          = false;    // Use Timed Profit Exit
+input int      InpProfitCloseHour         = 23;       // Sweep From Hour (0 - 23)
+input int      InpProfitCloseMin          = 0;        // Sweep From Min (0 - 59)
+input double   InpProfitCloseThreshold    = 0;        // Min Profit to Close, gross (0 = any)
 input group    "Visual Objects"
 input bool     InpShowObjects             = true;     // Draw Visual Objects
 input group    "Expert Identification"
 input ulong    InpMagicNumber             = 12345;    // Magic Number
+input group    "Optimization Criterion"
+input int      InpCritMinTrades           = 30;       // Min Trades, reject below (0 = off)
+input double   InpCritSigmaCut            = 3.0;      // Outlier Cut in sigmas (0 = off)
+input double   InpCritMaxTradeShare       = 0.30;     // Max Share of Profit From One Trade (0 = off)
+input double   InpCritMaxDDPercent        = 0;        // Max Equity DD %, reject above (0 = off)
 
 //--- Indicator handles
 int AtrHandle;
 int FractalHandle;
 int AdxHandle;
-int MaHandle;
 int VolAtrHandle;
+int TrendAtrHandle;
 
 //--- Globals
 CTrade Trade;
@@ -165,34 +162,32 @@ ENUM_TIMEFRAMES FractalTimeframe = PERIOD_M5;
 ENUM_TIMEFRAMES AtrTimeframe     = PERIOD_D1;
 
 string ObjPrefix        = "fractal_breakout_";
-string StartSuffix      = "_start";
-string EndSuffix        = "_end";
 string UpFractalSuffix  = "_up_fractal";
 string DnFractalSuffix  = "_dn_fractal";
-string StartLabel       = "Session Start";
-string EndLabel         = "Session Close";
 string UpFractalLabel   = "Up Fractal Limit";
 string DnFractalLabel   = "Dn Fractal Limit";
-color  StartColor       = clrCyan;
-color  EndColor         = clrViolet;
 color  UpFractalColor   = clrAzure;
 color  DnFractalColor   = clrBlanchedAlmond;
-
-int StartMinOffset = 15;
 
 Fractal gblUpFractal;
 Fractal gblDnFractal;
 
-bool gblIsOpen;
-bool gblIsStrategy;
-bool gblIsBuyTrade;
-bool gblIsSellTrade;
-
 double gblBuyPeak;
 double gblSellTrough;
 
-CDateTime gblLastOpenDate;
-CDateTime gblLastSessionSet;
+//--- Drawdown guard. The peak survives midnight so the guard measures true
+//--- drawdown; the block flag clears daily so trading can resume next day.
+double gblPeakEquity;
+double gblDayStartEquity;
+bool   gblTradingBlocked;
+
+//--- Trend filter state: +1 up, -1 down, 0 flat (flat blocks both directions).
+int      gblTrendDirection;
+datetime gblTrendBar;
+
+//--- Midnight of the day currently being traded; also the cut-off that keeps
+//--- yesterday's fractals from carrying over into today.
+datetime gblCurrentDay;
 
 datetime gblLastBuyTime;
 datetime gblLastSellTime;
@@ -201,7 +196,6 @@ datetime gblLastFractalBar;
 datetime gblTestStartTime;
 datetime gblTestEndTime;
 
-SessionTime    gblSession;
 ExpertStats    gblStats;
 VisualObjects  gblVisuals;
 
@@ -228,27 +222,23 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
      }
 
-   if(InpStartHour < 0 || InpStartHour > 23)
+   if(InpMaxOpenTrades < 0)
      {
-      Print("Please enter start hour between 0 and 23");
+      Print("Please enter max open positions of 0 or above (0 = unlimited)");
       return INIT_PARAMETERS_INCORRECT;
      }
 
-   if(InpStartMin < 0 || InpStartMin > 59)
+   if(InpMaxDrawdownUSD < 0)
      {
-      Print("Please enter start min between 0 and 59");
+      Print("Please enter max drawdown of 0 or above (0 = guard disabled)");
       return INIT_PARAMETERS_INCORRECT;
      }
 
-   if(InpEndHour < 0 || InpEndHour > 23)
+   if(InpUseProfitClose &&
+      (InpProfitCloseHour < 0 || InpProfitCloseHour > 23 ||
+       InpProfitCloseMin  < 0 || InpProfitCloseMin  > 59))
      {
-      Print("Please enter end hour between 0 and 23");
-      return INIT_PARAMETERS_INCORRECT;
-     }
-
-   if(InpEndMin < 0 || InpEndMin > 59)
-     {
-      Print("Please enter end min between 0 and 59");
+      Print("Timed profit exit: hour must be within 0..23 and minute within 0..59");
       return INIT_PARAMETERS_INCORRECT;
      }
 
@@ -301,9 +291,18 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
      }
 
-   if(InpUseMaFilter && InpMaPeriod <= 0)
+   if(InpUseTrendFilter && InpTrendMethod == trend_regression &&
+      (InpTrendRegBars < 3 || InpTrendRegMinSlope < 0 ||
+       InpTrendRegMinR2 < 0 || InpTrendRegMinR2 > 1))
      {
-      Print("Please enter MA period above 0");
+      Print("Regression trend filter: need bars >= 3, min slope >= 0, R-squared within 0..1");
+      return INIT_PARAMETERS_INCORRECT;
+     }
+
+   if(InpUseTrendFilter && InpTrendMethod == trend_efficiency &&
+      (InpTrendErBars < 3 || InpTrendErMinRatio < 0 || InpTrendErMinRatio > 1))
+     {
+      Print("Efficiency trend filter: need bars >= 3 and ratio within 0..1");
       return INIT_PARAMETERS_INCORRECT;
      }
 
@@ -313,10 +312,10 @@ int OnInit()
       return INIT_PARAMETERS_INCORRECT;
      }
 
-   if(InpSessionStartHour < 0 || InpSessionStartHour > 23 || InpSessionEndHour < 0 || InpSessionEndHour > 23 ||
-      InpSessionStartMin  < 0 || InpSessionStartMin  > 59 || InpSessionEndMin  < 0 || InpSessionEndMin  > 59)
+   if(InpUseSessionFilter && !InpEnableASIA && !InpEnableLONDON &&
+      !InpEnableNEWYORK && !InpEnableOVERLAP)
      {
-      Print("Please enter session filter hours/minutes within valid ranges");
+      Print("Session filter is on but every session is disabled - no entries would be possible");
       return INIT_PARAMETERS_INCORRECT;
      }
 
@@ -348,13 +347,14 @@ int OnInit()
         }
      }
 
-   MaHandle = INVALID_HANDLE;
-   if(InpUseMaFilter)
+//--- Regression normalises its slope by ATR of the same timeframe it measures
+   TrendAtrHandle = INVALID_HANDLE;
+   if(InpUseTrendFilter && InpTrendMethod == trend_regression)
      {
-      MaHandle = iMA(Symbol(), InpMaTimeframe, InpMaPeriod, 0, MODE_EMA, PRICE_CLOSE);
-      if(MaHandle == INVALID_HANDLE)
+      TrendAtrHandle = iATR(Symbol(), InpTrendRegTimeframe, InpAtrPeriod);
+      if(TrendAtrHandle == INVALID_HANDLE)
         {
-         Print("Failed to create MA handle");
+         Print("Failed to create trend ATR handle");
          return INIT_FAILED;
         }
      }
@@ -399,10 +399,10 @@ void OnDeinit(const int reason)
       IndicatorRelease(FractalHandle);
    if(AdxHandle      != INVALID_HANDLE)
       IndicatorRelease(AdxHandle);
-   if(MaHandle       != INVALID_HANDLE)
-      IndicatorRelease(MaHandle);
    if(VolAtrHandle   != INVALID_HANDLE)
       IndicatorRelease(VolAtrHandle);
+   if(TrendAtrHandle != INVALID_HANDLE)
+      IndicatorRelease(TrendAtrHandle);
 
 //--- Delete visual objects
    ObjectsDeleteAll(ChartID(), ObjPrefix);
@@ -420,47 +420,38 @@ void OnDeinit(const int reason)
 //+------------------------------------------------------------------+
 void OnTick()
   {
-//--- Check session bounds
-   if(!gblIsOpen)
+//--- Roll over per-day state at midnight
+   datetime today = TimeCurrent() - (TimeCurrent() % 86400);
+   if(gblCurrentDay != today)
      {
-      CDateTime curDay;
-      curDay.Date(TimeCurrent());
-
-      if(gblLastSessionSet.DateTime() != curDay.DateTime())
-        {
-         SetSessionTimes();
-         gblLastSessionSet.Date(curDay.DateTime());
-        }
-
-      if(gblSession.isSessionSet &&
-         (TimeCurrent() >= gblSession.start) &&
-         (TimeCurrent() <  gblSession.end))
-        {
-         Print("Market Open: ", gblSession.start);
-         gblLastOpenDate.Date(gblSession.start);
-         gblIsOpen = true;
-        }
+      InitGlobals();
+      gblCurrentDay     = today;
+      gblDayStartEquity = AccountInfoDouble(ACCOUNT_EQUITY);
      }
-   else
-     {
-      if(TimeCurrent() >= gblSession.end)
-        {
-         Print("Market Closed: ", gblSession.end);
-         CloseAllPositions();
-         InitGlobals();
-         return;
-        }
 
-      if(!gblIsStrategy && (TimeCurrent() >= gblSession.strategyStart))
+//--- Drawdown guard
+   if(InpMaxDrawdownUSD > 0)
+     {
+      double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+      if(equity > gblPeakEquity)
+         gblPeakEquity = equity;
+
+      if(!gblTradingBlocked)
         {
-         Print("Strategy Start: ", gblSession.strategyStart);
-         gblIsStrategy = true;
+         double drawdown = (InpDrawdownBasis == dd_peak_equity)
+                           ? gblPeakEquity     - equity
+                           : gblDayStartEquity - equity;
+         if(drawdown >= InpMaxDrawdownUSD)
+           {
+            gblTradingBlocked = true;
+            PrintFormat("Drawdown guard tripped: %.2f >= %.2f. New entries blocked until midnight.",
+                        drawdown, InpMaxDrawdownUSD);
+           }
         }
      }
 
-//--- Early return if strategy time is not reached
-   if(!gblIsStrategy)
-      return;
+//--- Refresh the trend direction (no-op until the trend timeframe closes a bar)
+   UpdateTrendDirection();
 
 //--- Set fractal values
    bool newFractalBar = IsNewFractalBar();
@@ -468,12 +459,12 @@ void OnTick()
      {
       if(!gblUpFractal.isSet)
         {
-         gblUpFractal = GetStrategyFractal(FractalHandle, fractal_high, InpFractalShift, FractalTimeframe, gblSession.start);
+         gblUpFractal = GetStrategyFractal(FractalHandle, fractal_high, InpFractalShift, FractalTimeframe, gblCurrentDay);
         }
 
       if(!gblDnFractal.isSet)
         {
-         gblDnFractal = GetStrategyFractal(FractalHandle, fractal_low, InpFractalShift, FractalTimeframe, gblSession.start);
+         gblDnFractal = GetStrategyFractal(FractalHandle, fractal_low, InpFractalShift, FractalTimeframe, gblCurrentDay);
         }
      }
 
@@ -490,43 +481,44 @@ void OnTick()
          ManageTrailingStops();
      }
 
-   if(gblUpFractal.isSet && !gblIsBuyTrade)
+//--- Sweep profitable positions once the configured time of day is reached
+   CloseProfitablePositions();
+
+   if(!gblTradingBlocked && gblUpFractal.isSet)
      {
       if(curTick.bid >= gblUpFractal.value)
         {
-         if(CheckAdxFilter(true) && CheckMaFilter(true) && CheckVolatilityFilter() &&
-            CheckSessionFilter() && CheckOverlapFilter())
+         if(OpenSlotAvailable() &&
+            CheckAdxFilter(true) && CheckTrendFilter(true) && CheckVolatilityFilter() &&
+            CheckSessionFilter())
            {
-            gblIsBuyTrade = true;
             if(OpenTrade(POSITION_TYPE_BUY, curTick))
               {
                gblLastBuyTime = TimeCurrent();
+               //--- Drop the fractal: the next entry must wait for a fresh breakout
+               gblUpFractal = Fractal();
+               gblVisuals.isUpFractal = false;
                Print("Buy trade taken at ", gblLastBuyTime);
-              }
-            else
-              {
-               gblIsBuyTrade = false;
               }
            }
         }
      }
 
-   if(gblDnFractal.isSet && !gblIsSellTrade)
+   if(!gblTradingBlocked && gblDnFractal.isSet)
      {
       if(curTick.bid <= gblDnFractal.value)
         {
-         if(CheckAdxFilter(false) && CheckMaFilter(false) && CheckVolatilityFilter() &&
-            CheckSessionFilter() && CheckOverlapFilter())
+         if(OpenSlotAvailable() &&
+            CheckAdxFilter(false) && CheckTrendFilter(false) && CheckVolatilityFilter() &&
+            CheckSessionFilter())
            {
-            gblIsSellTrade = true;
             if(OpenTrade(POSITION_TYPE_SELL, curTick))
               {
                gblLastSellTime = TimeCurrent();
+               //--- Drop the fractal: the next entry must wait for a fresh breakout
+               gblDnFractal = Fractal();
+               gblVisuals.isDnFractal = false;
                Print("Sell trade taken at ", gblLastSellTime);
-              }
-            else
-              {
-               gblIsSellTrade = false;
               }
            }
         }
@@ -534,7 +526,7 @@ void OnTick()
 
 //--- Draw graphical objects
    if(InpShowObjects)
-      DrawVisualObjects(gblSession, gblUpFractal, gblDnFractal, gblVisuals);
+      DrawVisualObjects(gblCurrentDay, gblUpFractal, gblDnFractal, gblVisuals);
   }
 
 //+------------------------------------------------------------------+
@@ -704,67 +696,6 @@ bool OpenTrade(ENUM_POSITION_TYPE posType, MqlTick &curTick)
   }
 
 //+------------------------------------------------------------------+
-//| Sets start, strategy and end times for the current trading day   |
-//+------------------------------------------------------------------+
-void SetSessionTimes()
-  {
-   CDateTime start;
-   CDateTime end;
-   CDateTime strategy;
-
-   start.Date(TimeCurrent());
-   start.Hour(InpStartHour);
-   start.Min(InpStartMin);
-   start.Sec(0);
-
-   strategy.DateTime(start.DateTime());
-   strategy.MinInc(StartMinOffset);
-
-   end.Date(TimeCurrent());
-   end.Hour(InpEndHour);
-   end.Min(InpEndMin);
-   end.Sec(0);
-
-//--- Increment ending date by 1 day if closing crosses over midnight
-   if((InpEndHour < InpStartHour) ||
-      ((InpStartHour == InpEndHour) && (InpEndMin <= InpStartMin)))
-     {
-      end.DayInc(1);
-     }
-
-   gblSession.start           = start.DateTime();
-   gblSession.strategyStart   = strategy.DateTime();
-   gblSession.end             = end.DateTime();
-   gblSession.isSessionSet    = true;
-  }
-
-//+------------------------------------------------------------------+
-//| Returns true if current time falls within the given daily window |
-//| (handles windows that cross midnight)                            |
-//+------------------------------------------------------------------+
-bool IsTimeInHourWindow(int startHour, int startMin, int endHour, int endMin)
-  {
-   CDateTime start;
-   CDateTime end;
-
-   start.Date(TimeCurrent());
-   start.Hour(startHour);
-   start.Min(startMin);
-   start.Sec(0);
-
-   end.Date(TimeCurrent());
-   end.Hour(endHour);
-   end.Min(endMin);
-   end.Sec(0);
-
-   if((endHour < startHour) || (endHour == startHour && endMin <= startMin))
-      end.DayInc(1);
-
-   datetime now = TimeCurrent();
-   return (now >= start.DateTime()) && (now < end.DateTime());
-  }
-
-//+------------------------------------------------------------------+
 //| ADX Filter: gates entries by trend strength and optionally       |
 //| by +DI/-DI direction. Returns true if the filter is disabled     |
 //| or the entry passes the filter                                   |
@@ -797,24 +728,123 @@ bool CheckAdxFilter(bool isBuy)
   }
 
 //+------------------------------------------------------------------+
-//| MA Trend Filter: gates entries by price vs. higher-TF EMA        |
+//| Trend direction by least-squares slope over closed bars 1..N.    |
+//| The slope is normalised by ATR of the same timeframe so the      |
+//| threshold stays comparable across price levels.                  |
 //+------------------------------------------------------------------+
-bool CheckMaFilter(bool isBuy)
+bool TrendByRegression(int &direction)
   {
-   if(!InpUseMaFilter)
+   int n = InpTrendRegBars;
+   double close[];
+//--- Oldest first, so a rising series gives a positive slope
+   ArraySetAsSeries(close, false);
+   if(CopyClose(Symbol(), InpTrendRegTimeframe, 1, n, close) < n)
+      return false;
+
+   double atr[];
+   if(CopyBuffer(TrendAtrHandle, 0, 1, 1, atr) <= 0 || atr[0] <= 0)
+      return false;
+
+   double sumX = 0, sumY = 0, sumXY = 0, sumXX = 0;
+   for(int i = 0; i < n; i++)
+     {
+      sumX  += i;
+      sumY  += close[i];
+      sumXY += i * close[i];
+      sumXX += (double)i * i;
+     }
+
+   double denom = n * sumXX - sumX * sumX;
+   if(denom == 0)
+      return false;
+
+   double slope     = (n * sumXY - sumX * sumY) / denom;
+   double intercept = (sumY - slope * sumX) / n;
+
+   double meanY = sumY / n;
+   double ssTot = 0, ssRes = 0;
+   for(int i = 0; i < n; i++)
+     {
+      double fit = intercept + slope * i;
+      ssTot += (close[i] - meanY) * (close[i] - meanY);
+      ssRes += (close[i] - fit)   * (close[i] - fit);
+     }
+   double r2 = (ssTot > 0) ? 1.0 - ssRes / ssTot : 0.0;
+
+   double slopeAtr = slope / atr[0];
+
+   direction = 0;
+   if(MathAbs(slopeAtr) >= InpTrendRegMinSlope && r2 >= InpTrendRegMinR2)
+      direction = (slopeAtr > 0) ? 1 : -1;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Trend direction by Kaufman Efficiency Ratio over closed bars     |
+//| 1..N: net move divided by the total path walked. 1 is a clean    |
+//| run, 0 is chop. Direction comes from the sign of the net move.   |
+//+------------------------------------------------------------------+
+bool TrendByEfficiency(int &direction)
+  {
+   int n = InpTrendErBars;
+   double close[];
+//--- Oldest first, so a rising series gives a positive net move
+   ArraySetAsSeries(close, false);
+   if(CopyClose(Symbol(), InpTrendErTimeframe, 1, n, close) < n)
+      return false;
+
+   double net  = close[n-1] - close[0];
+   double path = 0;
+   for(int i = 1; i < n; i++)
+      path += MathAbs(close[i] - close[i-1]);
+
+   if(path <= 0)
+      return false;
+
+   double ratio = MathAbs(net) / path;
+
+   direction = 0;
+   if(ratio >= InpTrendErMinRatio)
+      direction = (net > 0) ? 1 : -1;
+   return true;
+  }
+
+//+------------------------------------------------------------------+
+//| Recomputes the trend direction once per bar of the trend         |
+//| timeframe. Missing data leaves the reading flat, which blocks    |
+//| both sides rather than guessing a direction.                     |
+//+------------------------------------------------------------------+
+void UpdateTrendDirection()
+  {
+   if(!InpUseTrendFilter)
+      return;
+
+   ENUM_TIMEFRAMES tf = (InpTrendMethod == trend_regression)
+                        ? InpTrendRegTimeframe : InpTrendErTimeframe;
+   datetime bar = iTime(Symbol(), tf, 0);
+   if(bar == gblTrendBar)
+      return;
+
+   int  dir = 0;
+   bool ok  = (InpTrendMethod == trend_regression)
+              ? TrendByRegression(dir)
+              : TrendByEfficiency(dir);
+
+   gblTrendDirection = ok ? dir : 0;
+   gblTrendBar       = bar;
+  }
+
+//+------------------------------------------------------------------+
+//| Trend Filter: entries are allowed only along an established      |
+//| trend; a flat reading blocks both directions                     |
+//+------------------------------------------------------------------+
+bool CheckTrendFilter(bool isBuy)
+  {
+   if(!InpUseTrendFilter)
       return true;
-
-   double ma[];
-   if(CopyBuffer(MaHandle, 0, 1, 1, ma) <= 0)
+   if(gblTrendDirection == 0)
       return false;
-
-   double price = iClose(Symbol(), InpMaTimeframe, 1);
-   if(price == 0)
-      return false;
-
-   if(isBuy)
-      return price > ma[0];
-   return price < ma[0];
+   return isBuy ? (gblTrendDirection > 0) : (gblTrendDirection < 0);
   }
 
 //+------------------------------------------------------------------+
@@ -843,59 +873,25 @@ bool CheckVolatilityFilter()
   }
 
 //+------------------------------------------------------------------+
-//| Session Filter: gates entries to a single daily sub-window       |
+//| Session Filter: entry is allowed inside any enabled session      |
 //+------------------------------------------------------------------+
 bool CheckSessionFilter()
   {
    if(!InpUseSessionFilter)
       return true;
-   return IsTimeInHourWindow(InpSessionStartHour, InpSessionStartMin, InpSessionEndHour, InpSessionEndMin);
-  }
 
-//+------------------------------------------------------------------+
-//| Returns the fixed server-time hour window for a named session    |
-//+------------------------------------------------------------------+
-void GetNamedSessionHours(ENUM_SESSION_NAME session, int &startHour, int &startMin, int &endHour, int &endMin)
-  {
-   startMin = 0;
-   endMin   = 0;
-   switch(session)
-     {
-      case SESSION_SYDNEY:
-         startHour = 0;  endHour = 9;
-         break;
-      case SESSION_TOKYO:
-         startHour = 2;  endHour = 11;
-         break;
-      case SESSION_LONDON:
-         startHour = 10; endHour = 19;
-         break;
-      case SESSION_NEWYORK:
-         startHour = 15; endHour = 0; // wraps past midnight
-         break;
-      default:
-         startHour = 0;  endHour = 0;
-         break;
-     }
-  }
+   MqlDateTime dt;
+   if(InpSessionUseServerTime)
+      TimeToStruct(TimeCurrent(), dt);
+   else
+      TimeToStruct(TimeGMT(), dt);
+   int minutes = dt.hour * 60 + dt.min;
 
-//+------------------------------------------------------------------+
-//| Session Overlap Filter: gates entries to the intersection of two |
-//| named trading sessions (e.g. London / New York overlap)          |
-//+------------------------------------------------------------------+
-bool CheckOverlapFilter()
-  {
-   if(!InpUseOverlapFilter)
-      return true;
-
-   int aStartHour, aStartMin, aEndHour, aEndMin;
-   int bStartHour, bStartMin, bEndHour, bEndMin;
-   GetNamedSessionHours(InpOverlapSessionA, aStartHour, aStartMin, aEndHour, aEndMin);
-   GetNamedSessionHours(InpOverlapSessionB, bStartHour, bStartMin, bEndHour, bEndMin);
-
-   bool inA = IsTimeInHourWindow(aStartHour, aStartMin, aEndHour, aEndMin);
-   bool inB = IsTimeInHourWindow(bStartHour, bStartMin, bEndHour, bEndMin);
-   return inA && inB;
+   if(InpEnableASIA    && minutes >=  0      && minutes <  8 * 60) return true;
+   if(InpEnableLONDON  && minutes >=  8 * 60 && minutes < 16 * 60) return true;
+   if(InpEnableNEWYORK && minutes >= 13 * 60 && minutes < 21 * 60) return true;
+   if(InpEnableOVERLAP && minutes >= 13 * 60 && minutes < 16 * 60) return true;
+   return false;
   }
 
 //+------------------------------------------------------------------+
@@ -975,10 +971,7 @@ bool CheckFreezeLevel(double dist)
 //+------------------------------------------------------------------+
 void InitGlobals()
   {
-   gblIsOpen         = false;
-   gblIsStrategy     = false;
-   gblIsBuyTrade     = false;
-   gblIsSellTrade    = false;
+   gblTradingBlocked = false;
    gblBuyPeak        = 0;
    gblSellTrough     = 0;
    gblUpFractal      = Fractal();
@@ -1059,27 +1052,54 @@ void ManageTrailingStops()
   }
 
 //+------------------------------------------------------------------+
-//| Closes all open positions of current symbol and magic number     |
+//| True when this EA may open one more position on this symbol      |
 //+------------------------------------------------------------------+
-void CloseAllPositions()
+bool OpenSlotAvailable()
   {
-   for(int i = PositionsTotal()-1; i >= 0; i--)
+   if(InpMaxOpenTrades == 0)
+      return true;
+
+   int count = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      CPositionInfo posInfo;
+      if(!posInfo.SelectByIndex(i))
+         continue;
+      if(posInfo.Symbol() == Symbol() && posInfo.Magic() == InpMagicNumber)
+         count++;
+     }
+   return count < InpMaxOpenTrades;
+  }
+
+//+------------------------------------------------------------------+
+//| Timed Profit Exit: from the configured time until midnight, close |
+//| any position of this EA whose profit clears the threshold. Swap   |
+//| and commission are deliberately excluded from that profit.        |
+//+------------------------------------------------------------------+
+void CloseProfitablePositions()
+  {
+   if(!InpUseProfitClose)
+      return;
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(), dt);
+   if(dt.hour * 60 + dt.min < InpProfitCloseHour * 60 + InpProfitCloseMin)
+      return;
+
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
       CPositionInfo posInfo;
       if(!posInfo.SelectByIndex(i))
          continue;
       if(posInfo.Symbol() != Symbol() || posInfo.Magic() != InpMagicNumber)
          continue;
-      if(!Trade.PositionClose(posInfo.Ticket()))
-        {
-         Print("Failed to close position: ", posInfo.Ticket(), "Err: ", Trade.ResultRetcodeDescription());
+      if(posInfo.Profit() <= InpProfitCloseThreshold)
          continue;
-        }
-      if((Trade.ResultRetcode() != TRADE_RETCODE_DONE))
-        {
-         Print("Failed to close position: ", posInfo.Ticket(), "Err: ", Trade.ResultRetcodeDescription());
-         continue;
-        }
+
+      if(Trade.PositionClose(posInfo.Ticket()))
+         PrintFormat("Timed profit exit: closed #%I64u at %.2f", posInfo.Ticket(), posInfo.Profit());
+      else
+         Print("Timed profit exit failed for ", posInfo.Ticket(), ": ", Trade.ResultRetcodeDescription());
      }
   }
 
@@ -1148,8 +1168,6 @@ void AppendSummaryReport(string mode)
    if(needHeader)
       FileWrite(handle,
                 "Mode", "Run ID", "Date", "Symbol", "Period",
-                "Session Start", "Strategy Start", "Session End",
-                "Start Hour", "Start Min", "End Hour", "End Min",
                 "Fixed Lot", "ATR Period", "ATR Percent", "TP Multiplier",
                 "Use Trailing", "Trail ATR Percent", "Magic",
                 "Total Trades", "Win Count", "Loss Count", "Win Rate %",
@@ -1171,8 +1189,6 @@ void AppendSummaryReport(string mode)
 
    FileWrite(handle,
              mode, gblRunID, TimeToString(gblTestStartTime, TIME_DATE), Symbol(), EnumToString(Period()),
-             TimeToString(gblSession.start), TimeToString(gblSession.strategyStart), TimeToString(gblSession.end),
-             InpStartHour, InpStartMin, InpEndHour, InpEndMin,
              InpFixedLot, InpAtrPeriod, InpAtrPercent, InpTpMultiplier,
              InpUseTrailingStop, InpTrailAtrPercent, InpMagicNumber,
              totalTrades, winCount, lossCount, winRate,
@@ -1235,15 +1251,8 @@ void SaveResultsToCSV()
    FileWrite(handle, "Mode", mode);
    FileWrite(handle, "Symbol", Symbol());
    FileWrite(handle, "Period", EnumToString(Period()));
-   FileWrite(handle, "Start Time", TimeToString(gblSession.start));
-   FileWrite(handle, "Strategy Start", TimeToString(gblSession.strategyStart));
-   FileWrite(handle, "End Time", TimeToString(gblSession.end));
    FileWrite(handle, "");
    FileWrite(handle, "Input Parameters", "");
-   FileWrite(handle, "Start Hour", InpStartHour);
-   FileWrite(handle, "Start Min", InpStartMin);
-   FileWrite(handle, "End Hour", InpEndHour);
-   FileWrite(handle, "End Min", InpEndMin);
    FileWrite(handle, "Fixed Lot", InpFixedLot);
    FileWrite(handle, "ATR Period", InpAtrPeriod);
    FileWrite(handle, "ATR Percent", InpAtrPercent);
@@ -1348,29 +1357,16 @@ void PrintStats()
 //+------------------------------------------------------------------+
 //| Draws objects for strategy visualization                         |
 //+------------------------------------------------------------------+
-void DrawVisualObjects(const SessionTime &session, const Fractal &up, const Fractal &dn, VisualObjects &visuals)
+void DrawVisualObjects(datetime dayStart, const Fractal &up, const Fractal &dn, VisualObjects &visuals)
   {
-   long chartId   = ChartID();
-   int  subWindow = 0;
-   if(session.isSessionSet && !visuals.isSession)
-     {
-      string startName = ObjPrefix + TimeToString(session.start) + StartSuffix;
-      ObjectCreate(chartId, startName, OBJ_VLINE, subWindow, session.start, 0);
-      ObjectSetInteger(chartId, startName, OBJPROP_COLOR, StartColor);
-      ObjectSetString(chartId, startName, OBJPROP_TEXT, StartLabel);
-
-      string endName = ObjPrefix + TimeToString(session.end) + EndSuffix;
-      ObjectCreate(chartId, endName, OBJ_VLINE, subWindow, session.end, 0);
-      ObjectSetInteger(chartId, endName, OBJPROP_COLOR, EndColor);
-      ObjectSetString(chartId, endName, OBJPROP_TEXT, EndLabel);
-
-      visuals.isSession = true;
-     }
+   long     chartId   = ChartID();
+   int      subWindow = 0;
+   datetime dayEnd    = dayStart + 86400;
 
    if(up.isSet && !visuals.isUpFractal)
      {
-      string upFractalName = ObjPrefix + TimeToString(session.start) + UpFractalSuffix;
-      ObjectCreate(chartId, upFractalName, OBJ_TREND, subWindow, up.time, up.value, session.end, up.value);
+      string upFractalName = ObjPrefix + TimeToString(up.time) + UpFractalSuffix;
+      ObjectCreate(chartId, upFractalName, OBJ_TREND, subWindow, up.time, up.value, dayEnd, up.value);
       ObjectSetInteger(chartId, upFractalName, OBJPROP_STYLE, STYLE_DASH);
       ObjectSetInteger(chartId, upFractalName, OBJPROP_COLOR, UpFractalColor);
       ObjectSetString(chartId, upFractalName, OBJPROP_TEXT, UpFractalLabel);
@@ -1380,8 +1376,8 @@ void DrawVisualObjects(const SessionTime &session, const Fractal &up, const Frac
 
    if(dn.isSet && !visuals.isDnFractal)
      {
-      string dnFractalName = ObjPrefix + TimeToString(session.start) + DnFractalSuffix;
-      ObjectCreate(chartId, dnFractalName, OBJ_TREND, subWindow, dn.time, dn.value, session.end, dn.value);
+      string dnFractalName = ObjPrefix + TimeToString(dn.time) + DnFractalSuffix;
+      ObjectCreate(chartId, dnFractalName, OBJ_TREND, subWindow, dn.time, dn.value, dayEnd, dn.value);
       ObjectSetInteger(chartId, dnFractalName, OBJPROP_STYLE, STYLE_DASH);
       ObjectSetInteger(chartId, dnFractalName, OBJPROP_COLOR, DnFractalColor);
       ObjectSetString(chartId, dnFractalName, OBJPROP_TEXT, DnFractalLabel);
@@ -1441,5 +1437,93 @@ double GetATR(const int &atrHandle)
    if(CopyBuffer(atrHandle,0,1,1,atr) == -1)
       return EMPTY_VALUE;
    return atr[0];
+  }
+
+//+------------------------------------------------------------------+
+//| Net profit with outlier trades removed: anything above           |
+//| mean + N*sigma is dropped, so a pass cannot win on a couple of    |
+//| lucky trades. Falls back to the plain figure when disabled or     |
+//| when the sample is too small to estimate sigma.                   |
+//+------------------------------------------------------------------+
+double TrimmedProfit()
+  {
+   if(InpCritSigmaCut <= 0)
+      return TesterStatistics(STAT_PROFIT);
+
+   if(!HistorySelect(0, TimeCurrent()))
+      return TesterStatistics(STAT_PROFIT);
+
+   int total = HistoryDealsTotal();
+   double results[];
+   ArrayResize(results, total);
+
+   int n = 0;
+   for(int i = 0; i < total; i++)
+     {
+      ulong ticket = HistoryDealGetTicket(i);
+      if(ticket == 0)
+         continue;
+      if((ENUM_DEAL_ENTRY)HistoryDealGetInteger(ticket, DEAL_ENTRY) != DEAL_ENTRY_OUT)
+         continue;
+      results[n++] = HistoryDealGetDouble(ticket, DEAL_PROFIT)
+                   + HistoryDealGetDouble(ticket, DEAL_SWAP)
+                   + HistoryDealGetDouble(ticket, DEAL_COMMISSION);
+     }
+
+   if(n < 2)
+      return TesterStatistics(STAT_PROFIT);
+
+   double sum = 0;
+   for(int i = 0; i < n; i++)
+      sum += results[i];
+   double mean = sum / n;
+
+   double variance = 0;
+   for(int i = 0; i < n; i++)
+      variance += (results[i] - mean) * (results[i] - mean);
+   double sigma = MathSqrt(variance / n);
+
+   double cutoff  = mean + InpCritSigmaCut * sigma;
+   double trimmed = 0;
+   for(int i = 0; i < n; i++)
+      if(results[i] <= cutoff)
+         trimmed += results[i];
+
+   return trimmed;
+  }
+
+//+------------------------------------------------------------------+
+//| Custom optimization criterion. Set OptimizationCriterion=6        |
+//| (Custom max) in the tester for this to drive pass ranking.        |
+//| Gates return 0; everything else stays continuous so the genetic   |
+//| algorithm keeps a gradient to climb.                              |
+//+------------------------------------------------------------------+
+double OnTester()
+  {
+   int trades = (int)TesterStatistics(STAT_TRADES);
+   if(InpCritMinTrades > 0 && trades < InpCritMinTrades)
+      return 0.0;
+
+   double drawdown = TesterStatistics(STAT_EQUITY_DDREL_PERCENT);
+   if(InpCritMaxDDPercent > 0 && drawdown > InpCritMaxDDPercent)
+      return 0.0;
+
+   double rawProfit = TesterStatistics(STAT_PROFIT);
+   if(rawProfit <= 0)
+      return 0.0;
+
+//--- Reject a pass carried by a single trade
+   if(InpCritMaxTradeShare > 0 &&
+      TesterStatistics(STAT_MAX_PROFITTRADE) / rawProfit > InpCritMaxTradeShare)
+      return 0.0;
+
+   double profit = TrimmedProfit();
+   if(profit <= 0)
+      return 0.0;
+
+//--- Significance grows with the square root of the sample, not linearly
+   if(drawdown <= 0)
+      drawdown = 0.01;
+   return (profit / drawdown) * MathSqrt((double)trades);
   }
 //+------------------------------------------------------------------+
