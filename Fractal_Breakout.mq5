@@ -10,6 +10,7 @@
 
 #include <Trade\Trade.mqh>
 #include <Trade\PositionInfo.mqh>
+#include "FractalExport.mqh"
 
 //--- Enums
 enum FractalType
@@ -129,9 +130,15 @@ input bool     InpSessionUseServerTime    = true;     // Time source: true=serve
 input group    "Trailing Stop"
 input bool     InpUseTrailingStop         = true;     // Use Trailing Stop
 input double   InpTrailAtrPercent         = 10;       // Trailing Stop ATR Percent
+input bool     InpTrailAfterBreakeven     = true;     // Start Trailing Only After Breakeven
+input group    "Breakeven"
+input bool     InpUseBreakeven            = false;    // Use Breakeven
+input double   InpBreakevenAtrPercent     = 50;       // Trigger: profit as % of ATR
+input double   InpBreakevenLockAtrPercent = 5;        // Lock beyond entry, % of ATR (0 = exact)
 input group    "Drawdown Guard"
 input double   InpMaxDrawdownUSD          = 0;        // Max Drawdown, deposit currency (0 = off)
 input DrawdownBasis InpDrawdownBasis      = dd_peak_equity; // Drawdown Basis
+input bool     InpDrawdownForceClose      = false;    // Force-close open positions on trip (false = only block new entries)
 input group    "Timed Profit Exit"
 input bool     InpUseProfitClose          = false;    // Use Timed Profit Exit
 input int      InpProfitCloseHour         = 23;       // Sweep From Hour (0 - 23)
@@ -199,8 +206,219 @@ ExpertStats    gblStats;
 VisualObjects  gblVisuals;
 
 bool   gblInitOK = false;
-string gblRunID  = "";
-string WfoFolder = "WFO\\";
+
+//+------------------------------------------------------------------+
+//| CSV export. FxColumns() and FxFill() must stay in the same order.|
+//+------------------------------------------------------------------+
+#define FX_META     3
+#define FX_PARAMS   49
+#define FX_METRICS  42
+#define FX_VALUES   (FX_META + FX_PARAMS + FX_METRICS)
+
+CCSVExporter gExport;
+
+void FxColumns(string &c[])
+  {
+   ArrayResize(c, 2 + FX_VALUES);
+   int i = 0;
+   c[i++] = "symbol";
+   c[i++] = "timeframe";
+   c[i++] = "mode";
+   c[i++] = "test_start_ts";
+   c[i++] = "test_end_ts";
+   c[i++] = "InpFixedLot";
+   c[i++] = "InpAtrPeriod";
+   c[i++] = "InpMaxOpenTrades";
+   c[i++] = "InpAtrPercent";
+   c[i++] = "InpTpMultiplier";
+   c[i++] = "InpFractalShift";
+   c[i++] = "InpUseAdxFilter";
+   c[i++] = "InpAdxTimeframe";
+   c[i++] = "InpAdxPeriod";
+   c[i++] = "InpAdxThreshold";
+   c[i++] = "InpAdxUseDirection";
+   c[i++] = "InpUseTrendFilter";
+   c[i++] = "InpTrendMethod";
+   c[i++] = "InpTrendRegTimeframe";
+   c[i++] = "InpTrendRegBars";
+   c[i++] = "InpTrendRegMinSlope";
+   c[i++] = "InpTrendRegMinR2";
+   c[i++] = "InpTrendErTimeframe";
+   c[i++] = "InpTrendErBars";
+   c[i++] = "InpTrendErMinRatio";
+   c[i++] = "InpUseVolatilityFilter";
+   c[i++] = "InpVolAtrTimeframe";
+   c[i++] = "InpVolAtrPeriod";
+   c[i++] = "InpVolAtrAvgPeriod";
+   c[i++] = "InpVolAtrRatioMin";
+   c[i++] = "InpUseSessionFilter";
+   c[i++] = "InpEnableASIA";
+   c[i++] = "InpEnableLONDON";
+   c[i++] = "InpEnableNEWYORK";
+   c[i++] = "InpSessionUseServerTime";
+   c[i++] = "InpUseTrailingStop";
+   c[i++] = "InpTrailAtrPercent";
+   c[i++] = "InpTrailAfterBreakeven";
+   c[i++] = "InpUseBreakeven";
+   c[i++] = "InpBreakevenAtrPercent";
+   c[i++] = "InpBreakevenLockAtrPercent";
+   c[i++] = "InpMaxDrawdownUSD";
+   c[i++] = "InpDrawdownBasis";
+   c[i++] = "InpDrawdownForceClose";
+   c[i++] = "InpUseProfitClose";
+   c[i++] = "InpProfitCloseHour";
+   c[i++] = "InpProfitCloseMin";
+   c[i++] = "InpProfitCloseThreshold";
+   c[i++] = "InpShowObjects";
+   c[i++] = "InpMagicNumber";
+   c[i++] = "InpCritMinTrades";
+   c[i++] = "InpCritSigmaCut";
+   c[i++] = "InpCritMaxTradeShare";
+   c[i++] = "InpCritMaxDDPercent";
+   c[i++] = "initial_deposit";
+   c[i++] = "withdrawal";
+   c[i++] = "profit";
+   c[i++] = "gross_profit";
+   c[i++] = "gross_loss";
+   c[i++] = "profit_factor";
+   c[i++] = "expected_payoff";
+   c[i++] = "recovery_factor";
+   c[i++] = "sharpe";
+   c[i++] = "min_margin_level";
+   c[i++] = "complex_criterion";
+   c[i++] = "deals";
+   c[i++] = "trades";
+   c[i++] = "profit_trades";
+   c[i++] = "loss_trades";
+   c[i++] = "short_trades";
+   c[i++] = "long_trades";
+   c[i++] = "profit_short_trades";
+   c[i++] = "profit_long_trades";
+   c[i++] = "balance_min";
+   c[i++] = "balance_dd";
+   c[i++] = "balance_dd_pct_abs";
+   c[i++] = "balance_dd_relative";
+   c[i++] = "balance_dd_pct";
+   c[i++] = "equity_min";
+   c[i++] = "equity_dd";
+   c[i++] = "equity_dd_pct_abs";
+   c[i++] = "equity_dd_relative";
+   c[i++] = "equity_dd_pct";
+   c[i++] = "max_profit_trade";
+   c[i++] = "max_loss_trade";
+   c[i++] = "con_profit_max";
+   c[i++] = "con_profit_max_trades";
+   c[i++] = "max_con_wins";
+   c[i++] = "max_con_profit_trades";
+   c[i++] = "con_loss_max";
+   c[i++] = "con_loss_max_trades";
+   c[i++] = "max_con_losses";
+   c[i++] = "max_con_loss_trades";
+   c[i++] = "avg_con_wins";
+   c[i++] = "avg_con_losses";
+   c[i++] = "custom";
+  }
+
+//--- mode: 0 = optimisation pass, 1 = single run
+void FxFill(double &d[], const double custom)
+  {
+   ArrayResize(d, FX_VALUES);
+   int i = 0;
+   d[i++] = MQLInfoInteger(MQL_OPTIMIZATION) ? 0.0 : 1.0;
+   d[i++] = (double)gblTestStartTime;
+   d[i++] = (double)TimeCurrent();
+   d[i++] = (double)InpFixedLot;
+   d[i++] = (double)InpAtrPeriod;
+   d[i++] = (double)InpMaxOpenTrades;
+   d[i++] = (double)InpAtrPercent;
+   d[i++] = (double)InpTpMultiplier;
+   d[i++] = (double)InpFractalShift;
+   d[i++] = (double)InpUseAdxFilter;
+   d[i++] = (double)InpAdxTimeframe;
+   d[i++] = (double)InpAdxPeriod;
+   d[i++] = (double)InpAdxThreshold;
+   d[i++] = (double)InpAdxUseDirection;
+   d[i++] = (double)InpUseTrendFilter;
+   d[i++] = (double)InpTrendMethod;
+   d[i++] = (double)InpTrendRegTimeframe;
+   d[i++] = (double)InpTrendRegBars;
+   d[i++] = (double)InpTrendRegMinSlope;
+   d[i++] = (double)InpTrendRegMinR2;
+   d[i++] = (double)InpTrendErTimeframe;
+   d[i++] = (double)InpTrendErBars;
+   d[i++] = (double)InpTrendErMinRatio;
+   d[i++] = (double)InpUseVolatilityFilter;
+   d[i++] = (double)InpVolAtrTimeframe;
+   d[i++] = (double)InpVolAtrPeriod;
+   d[i++] = (double)InpVolAtrAvgPeriod;
+   d[i++] = (double)InpVolAtrRatioMin;
+   d[i++] = (double)InpUseSessionFilter;
+   d[i++] = (double)InpEnableASIA;
+   d[i++] = (double)InpEnableLONDON;
+   d[i++] = (double)InpEnableNEWYORK;
+   d[i++] = (double)InpSessionUseServerTime;
+   d[i++] = (double)InpUseTrailingStop;
+   d[i++] = (double)InpTrailAtrPercent;
+   d[i++] = (double)InpTrailAfterBreakeven;
+   d[i++] = (double)InpUseBreakeven;
+   d[i++] = (double)InpBreakevenAtrPercent;
+   d[i++] = (double)InpBreakevenLockAtrPercent;
+   d[i++] = (double)InpMaxDrawdownUSD;
+   d[i++] = (double)InpDrawdownBasis;
+   d[i++] = (double)InpDrawdownForceClose;
+   d[i++] = (double)InpUseProfitClose;
+   d[i++] = (double)InpProfitCloseHour;
+   d[i++] = (double)InpProfitCloseMin;
+   d[i++] = (double)InpProfitCloseThreshold;
+   d[i++] = (double)InpShowObjects;
+   d[i++] = (double)InpMagicNumber;
+   d[i++] = (double)InpCritMinTrades;
+   d[i++] = (double)InpCritSigmaCut;
+   d[i++] = (double)InpCritMaxTradeShare;
+   d[i++] = (double)InpCritMaxDDPercent;
+   d[i++] = TesterStatistics(STAT_INITIAL_DEPOSIT);
+   d[i++] = TesterStatistics(STAT_WITHDRAWAL);
+   d[i++] = TesterStatistics(STAT_PROFIT);
+   d[i++] = TesterStatistics(STAT_GROSS_PROFIT);
+   d[i++] = TesterStatistics(STAT_GROSS_LOSS);
+   d[i++] = TesterStatistics(STAT_PROFIT_FACTOR);
+   d[i++] = TesterStatistics(STAT_EXPECTED_PAYOFF);
+   d[i++] = TesterStatistics(STAT_RECOVERY_FACTOR);
+   d[i++] = TesterStatistics(STAT_SHARPE_RATIO);
+   d[i++] = TesterStatistics(STAT_MIN_MARGINLEVEL);
+   d[i++] = TesterStatistics(STAT_COMPLEX_CRITERION);
+   d[i++] = TesterStatistics(STAT_DEALS);
+   d[i++] = TesterStatistics(STAT_TRADES);
+   d[i++] = TesterStatistics(STAT_PROFIT_TRADES);
+   d[i++] = TesterStatistics(STAT_LOSS_TRADES);
+   d[i++] = TesterStatistics(STAT_SHORT_TRADES);
+   d[i++] = TesterStatistics(STAT_LONG_TRADES);
+   d[i++] = TesterStatistics(STAT_PROFIT_SHORTTRADES);
+   d[i++] = TesterStatistics(STAT_PROFIT_LONGTRADES);
+   d[i++] = TesterStatistics(STAT_BALANCEMIN);
+   d[i++] = TesterStatistics(STAT_BALANCE_DD);
+   d[i++] = TesterStatistics(STAT_BALANCEDD_PERCENT);
+   d[i++] = TesterStatistics(STAT_BALANCE_DD_RELATIVE);
+   d[i++] = TesterStatistics(STAT_BALANCE_DDREL_PERCENT);
+   d[i++] = TesterStatistics(STAT_EQUITYMIN);
+   d[i++] = TesterStatistics(STAT_EQUITY_DD);
+   d[i++] = TesterStatistics(STAT_EQUITYDD_PERCENT);
+   d[i++] = TesterStatistics(STAT_EQUITY_DD_RELATIVE);
+   d[i++] = TesterStatistics(STAT_EQUITY_DDREL_PERCENT);
+   d[i++] = TesterStatistics(STAT_MAX_PROFITTRADE);
+   d[i++] = TesterStatistics(STAT_MAX_LOSSTRADE);
+   d[i++] = TesterStatistics(STAT_CONPROFITMAX);
+   d[i++] = TesterStatistics(STAT_CONPROFITMAX_TRADES);
+   d[i++] = TesterStatistics(STAT_MAX_CONWINS);
+   d[i++] = TesterStatistics(STAT_MAX_CONPROFIT_TRADES);
+   d[i++] = TesterStatistics(STAT_CONLOSSMAX);
+   d[i++] = TesterStatistics(STAT_CONLOSSMAX_TRADES);
+   d[i++] = TesterStatistics(STAT_MAX_CONLOSSES);
+   d[i++] = TesterStatistics(STAT_MAX_CONLOSS_TRADES);
+   d[i++] = TesterStatistics(STAT_PROFITTRADES_AVGCON);
+   d[i++] = TesterStatistics(STAT_LOSSTRADES_AVGCON);
+   d[i++] = custom;
+  }
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -376,9 +594,17 @@ int OnInit()
    gblTestStartTime = TimeCurrent();
    gblTestEndTime = TimeCurrent();
 
+   if(InpUseTrailingStop && InpTrailAfterBreakeven && !InpUseBreakeven)
+      Print("WARNING: trailing waits for breakeven, but breakeven is off - trailing will never start");
+
    gblInitOK = true;
-   gblRunID  = GenerateRunID();
-   Print("Run ID: ", gblRunID);
+
+//--- CSV export stream: one file per run mode, shared by all agents
+   string csvCols[];
+   FxColumns(csvCols);
+   string csvName = MQLInfoInteger(MQL_OPTIMIZATION) ? "Fractal_OPT.csv" : "Fractal_OOS.csv";
+   if(!gExport.Open(csvName, csvCols))
+      Print("FractalExport: stream unavailable - rows will NOT be saved");
 
 //--- Enable chart property to show object labels
    if(InpShowObjects)
@@ -406,12 +632,13 @@ void OnDeinit(const int reason)
 //--- Delete visual objects
    ObjectsDeleteAll(ChartID(), ObjPrefix);
 
-//--- Print strategy stats and save results to CSV
+//--- Print strategy stats
    if(gblInitOK)
      {
       PrintStats();
-      SaveResultsToCSV();
      }
+
+   gExport.Close();
   }
 
 //+------------------------------------------------------------------+
@@ -445,6 +672,8 @@ void OnTick()
             gblTradingBlocked = true;
             PrintFormat("Drawdown guard tripped: %.2f >= %.2f. New entries blocked until midnight.",
                         drawdown, InpMaxDrawdownUSD);
+            if(InpDrawdownForceClose)
+               CloseAllPositions();
            }
         }
      }
@@ -471,6 +700,9 @@ void OnTick()
    MqlTick curTick;
    if(!SymbolInfoTick(Symbol(), curTick))
       return;
+
+//--- Protect a position that has run far enough in our favour
+   ManageBreakeven();
 
 //--- Update trailing stop
    if(InpUseTrailingStop)
@@ -991,6 +1223,72 @@ void UpdateTrailExtremes(const MqlTick &curTick)
   }
 
 //+------------------------------------------------------------------+
+//| Breakeven: once a position is far enough in profit, pull the stop|
+//| up to entry (plus an optional lock) so it can no longer lose.    |
+//| Only ever improves the stop, so it cannot fight the trailing.    |
+//+------------------------------------------------------------------+
+void ManageBreakeven()
+  {
+   if(!InpUseBreakeven)
+      return;
+
+   double atr = GetATR(AtrHandle);
+   if(atr == EMPTY_VALUE || atr <= 0)
+      return;
+
+   double trigger = InpBreakevenAtrPercent / 100 * atr;
+   double lock    = InpBreakevenLockAtrPercent / 100 * atr;
+   if(trigger <= 0)
+      return;
+
+   MqlTick curTick;
+   if(!SymbolInfoTick(Symbol(), curTick))
+      return;
+
+   double tickSize = SymbolInfoDouble(Symbol(), SYMBOL_TRADE_TICK_SIZE);
+   if(tickSize <= 0)
+      tickSize = Point();
+
+   for(int i = PositionsTotal()-1; i >= 0; i--)
+     {
+      CPositionInfo posInfo;
+      if(!posInfo.SelectByIndex(i))
+         continue;
+      if(posInfo.Symbol() != Symbol() || posInfo.Magic() != InpMagicNumber)
+         continue;
+
+      double openPrice = posInfo.PriceOpen();
+      double curSl     = posInfo.StopLoss();
+
+      if(posInfo.PositionType() == POSITION_TYPE_BUY)
+        {
+         if(curTick.bid - openPrice < trigger)
+            continue;
+         double newSl = openPrice + lock;
+         if(curSl != 0 && newSl - curSl < tickSize)
+            continue;
+         if(!CheckStopsLevel(curTick.bid - newSl) || !CheckFreezeLevel(curTick.bid - newSl))
+            continue;
+         if(Trade.PositionModify(posInfo.Ticket(), newSl, posInfo.TakeProfit()))
+            Print("Breakeven SL set for buy position: ", posInfo.Ticket(), " -> ", newSl);
+        }
+      else
+         if(posInfo.PositionType() == POSITION_TYPE_SELL)
+           {
+            if(openPrice - curTick.ask < trigger)
+               continue;
+            double newSl = openPrice - lock;
+            if(curSl != 0 && curSl - newSl < tickSize)
+               continue;
+            if(!CheckStopsLevel(newSl - curTick.ask) || !CheckFreezeLevel(newSl - curTick.ask))
+               continue;
+            if(Trade.PositionModify(posInfo.Ticket(), newSl, posInfo.TakeProfit()))
+               Print("Breakeven SL set for sell position: ", posInfo.Ticket(), " -> ", newSl);
+           }
+     }
+  }
+
+//+------------------------------------------------------------------+
 //| Trails stop loss for open positions of this EA                   |
 //+------------------------------------------------------------------+
 void ManageTrailingStops()
@@ -1021,8 +1319,13 @@ void ManageTrailingStops()
 
       if(posInfo.PositionType() == POSITION_TYPE_BUY)
         {
-         double newSl = gblBuyPeak - trailDist;
          double curSl = posInfo.StopLoss();
+
+         //--- A stop at or past entry means breakeven has already fired
+         if(InpTrailAfterBreakeven && (curSl == 0 || curSl < posInfo.PriceOpen()))
+            continue;
+
+         double newSl = gblBuyPeak - trailDist;
          if(curSl == 0 || newSl - curSl < tickSize)
             continue;
          if(!CheckFreezeLevel(curTick.bid - newSl))
@@ -1035,8 +1338,13 @@ void ManageTrailingStops()
       else
          if(posInfo.PositionType() == POSITION_TYPE_SELL)
            {
-            double newSl = gblSellTrough + trailDist;
             double curSl = posInfo.StopLoss();
+
+            //--- A stop at or past entry means breakeven has already fired
+            if(InpTrailAfterBreakeven && (curSl == 0 || curSl > posInfo.PriceOpen()))
+               continue;
+
+            double newSl = gblSellTrough + trailDist;
             if(curSl == 0 || curSl - newSl < tickSize)
                continue;
             if(!CheckFreezeLevel(newSl - curTick.ask))
@@ -1102,219 +1410,25 @@ void CloseProfitablePositions()
   }
 
 //+------------------------------------------------------------------+
-//| Generates unique run id (time + tick count + file existence)      |
+//| Drawdown guard escalation: closes every open position of this EA |
+//| on this symbol, regardless of profit, instead of just waiting    |
+//| for new entries to stay blocked.                                  |
 //+------------------------------------------------------------------+
-string GenerateRunID()
+void CloseAllPositions()
   {
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
-   string base = StringFormat("%04d%02d%02d_%02d%02d%02d",
-                              dt.year, dt.mon, dt.day, dt.hour, dt.min, dt.sec);
-
-   string id = base + StringFormat("_%05d", (GetTickCount() % 100000));
-   int guard = 0;
-   while(guard < 1000 && FileIsExist(GetRunFileName(GetRunModeLabel(), id), FILE_COMMON))
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
      {
-      guard++;
-      id = base + StringFormat("_%05d", ((GetTickCount() + guard) % 100000));
+      CPositionInfo posInfo;
+      if(!posInfo.SelectByIndex(i))
+         continue;
+      if(posInfo.Symbol() != Symbol() || posInfo.Magic() != InpMagicNumber)
+         continue;
+
+      if(Trade.PositionClose(posInfo.Ticket()))
+         PrintFormat("Drawdown guard: force-closed #%I64u at %.2f", posInfo.Ticket(), posInfo.Profit());
+      else
+         Print("Drawdown guard: force-close failed for ", posInfo.Ticket(), ": ", Trade.ResultRetcodeDescription());
      }
-   return id;
-  }
-
-//+------------------------------------------------------------------+
-//| Returns run mode label: optimization pass or forward/regular run |
-//+------------------------------------------------------------------+
-string GetRunModeLabel()
-  {
-   if(MQLInfoInteger(MQL_OPTIMIZATION))
-      return "OPT";
-   return "FWD";
-  }
-
-//+------------------------------------------------------------------+
-//| Builds per-run CSV file name inside the WFO folder               |
-//+------------------------------------------------------------------+
-string GetRunFileName(string mode, string id)
-  {
-   return WfoFolder + StringFormat("Fractal_Breakout_%s_%s.csv", mode, id);
-  }
-
-//+------------------------------------------------------------------+
-//| Appends one summary line to the monthly WFO report CSV           |
-//+------------------------------------------------------------------+
-void AppendSummaryReport(string mode)
-  {
-   MqlDateTime dt;
-   TimeToStruct(TimeCurrent(), dt);
-   string reportName = WfoFolder + StringFormat("Fractal_Breakout_Report_%04d%02d.csv", dt.year, dt.mon);
-
-   bool needHeader = false;
-   int handle = FileOpen(reportName, FILE_READ | FILE_WRITE | FILE_CSV | FILE_COMMON);
-   if(handle == INVALID_HANDLE)
-     {
-      handle = FileOpen(reportName, FILE_WRITE | FILE_CSV | FILE_COMMON);
-      if(handle == INVALID_HANDLE)
-        {
-         Print("Failed to open report: ", reportName);
-         return;
-        }
-      needHeader = true;
-     }
-
-   FileSeek(handle, 0, SEEK_END);
-
-   if(needHeader)
-      FileWrite(handle,
-                "Mode", "Run ID", "Date", "Symbol", "Period",
-                "Fixed Lot", "ATR Period", "ATR Percent", "TP Multiplier",
-                "Use Trailing", "Trail ATR Percent", "Magic",
-                "Total Trades", "Win Count", "Loss Count", "Win Rate %",
-                "Total P/L", "Buy Trades", "Buy P/L", "Sell Trades", "Sell P/L");
-
-   int totalTrades = GetTotalTrades();
-   int winCount    = GetWinCount();
-   int lossCount   = totalTrades - winCount;
-   double winRate  = (totalTrades > 0) ? (double) winCount / totalTrades * 100 : 0;
-   double totalPL  = GetTotalProfit();
-   double buyPL    = gblStats.buy.slGross + gblStats.buy.tpGross +
-                     gblStats.buy.closeProfitGross + gblStats.buy.closeLossGross;
-   double sellPL   = gblStats.sell.slGross + gblStats.sell.tpGross +
-                     gblStats.sell.closeProfitGross + gblStats.sell.closeLossGross;
-   int buyTrades   = gblStats.buy.slCount + gblStats.buy.tpCount +
-                     gblStats.buy.closeProfitCount + gblStats.buy.closeLossCount;
-   int sellTrades  = gblStats.sell.slCount + gblStats.sell.tpCount +
-                     gblStats.sell.closeProfitCount + gblStats.sell.closeLossCount;
-
-   FileWrite(handle,
-             mode, gblRunID, TimeToString(gblTestStartTime, TIME_DATE), Symbol(), EnumToString(Period()),
-             InpFixedLot, InpAtrPeriod, InpAtrPercent, InpTpMultiplier,
-             InpUseTrailingStop, InpTrailAtrPercent, InpMagicNumber,
-             totalTrades, winCount, lossCount, winRate,
-             totalPL, buyTrades, buyPL, sellTrades, sellPL);
-
-   FileFlush(handle);
-   FileClose(handle);
-   Print("Summary appended: ", reportName);
-  }
-
-//+------------------------------------------------------------------+
-//| Returns total number of closed trades across both directions     |
-//+------------------------------------------------------------------+
-int GetTotalTrades()
-  {
-   return gblStats.buy.slCount + gblStats.buy.tpCount +
-          gblStats.buy.closeProfitCount + gblStats.buy.closeLossCount +
-          gblStats.sell.slCount + gblStats.sell.tpCount +
-          gblStats.sell.closeProfitCount + gblStats.sell.closeLossCount;
-  }
-
-//+------------------------------------------------------------------+
-//| Returns total number of profitable closed trades                 |
-//+------------------------------------------------------------------+
-int GetWinCount()
-  {
-   return gblStats.buy.tpCount + gblStats.buy.closeProfitCount +
-          gblStats.sell.tpCount + gblStats.sell.closeProfitCount;
-  }
-
-//+------------------------------------------------------------------+
-//| Returns total gross profit/loss across both directions           |
-//+------------------------------------------------------------------+
-double GetTotalProfit()
-  {
-   return gblStats.buy.slGross + gblStats.buy.tpGross +
-          gblStats.buy.closeProfitGross + gblStats.buy.closeLossGross +
-          gblStats.sell.slGross + gblStats.sell.tpGross +
-          gblStats.sell.closeProfitGross + gblStats.sell.closeLossGross;
-  }
-//+------------------------------------------------------------------+
-//| Saves strategy results to CSV file                                |
-//+------------------------------------------------------------------+
-void SaveResultsToCSV()
-  {
-   gblTestEndTime = TimeCurrent();
-
-   string mode = GetRunModeLabel();
-   string filename = GetRunFileName(mode, gblRunID);
-
-   int handle = FileOpen(filename, FILE_WRITE | FILE_CSV | FILE_COMMON);
-   if(handle == INVALID_HANDLE)
-     {
-      Print("Failed to open CSV file: ", filename);
-      return;
-     }
-
-   FileWrite(handle, "Parameter", "Value");
-   FileWrite(handle, "Run ID", gblRunID);
-   FileWrite(handle, "Mode", mode);
-   FileWrite(handle, "Symbol", Symbol());
-   FileWrite(handle, "Period", EnumToString(Period()));
-   FileWrite(handle, "");
-   FileWrite(handle, "Input Parameters", "");
-   FileWrite(handle, "Fixed Lot", InpFixedLot);
-   FileWrite(handle, "ATR Period", InpAtrPeriod);
-   FileWrite(handle, "ATR Percent", InpAtrPercent);
-   FileWrite(handle, "TP Multiplier", InpTpMultiplier);
-   FileWrite(handle, "Use Trailing Stop", InpUseTrailingStop);
-   FileWrite(handle, "Trail ATR Percent", InpTrailAtrPercent);
-   FileWrite(handle, "Magic Number", InpMagicNumber);
-   FileWrite(handle, "");
-   FileWrite(handle, "Performance Statistics", "");
-   FileWrite(handle, "Total Trades", (gblStats.buy.slCount + gblStats.buy.tpCount +
-                                      gblStats.buy.closeProfitCount + gblStats.buy.closeLossCount +
-                                      gblStats.sell.slCount + gblStats.sell.tpCount +
-                                      gblStats.sell.closeProfitCount + gblStats.sell.closeLossCount));
-
-   double totalProfit = gblStats.buy.slGross + gblStats.buy.tpGross +
-                       gblStats.buy.closeProfitGross + gblStats.buy.closeLossGross +
-                       gblStats.sell.slGross + gblStats.sell.tpGross +
-                       gblStats.sell.closeProfitGross + gblStats.sell.closeLossGross;
-   FileWrite(handle, "Total Profit/Loss", totalProfit);
-
-   int winCount = gblStats.buy.tpCount + gblStats.buy.closeProfitCount +
-                  gblStats.sell.tpCount + gblStats.sell.closeProfitCount;
-   int lossCount = gblStats.buy.slCount + gblStats.buy.closeLossCount +
-                   gblStats.sell.slCount + gblStats.sell.closeLossCount;
-   int totalTrades = winCount + lossCount;
-
-   FileWrite(handle, "Win Count", winCount);
-   FileWrite(handle, "Loss Count", lossCount);
-
-   if(totalTrades > 0)
-      FileWrite(handle, "Win Rate %", (double)winCount / totalTrades * 100);
-   else
-      FileWrite(handle, "Win Rate %", 0);
-
-   FileWrite(handle, "");
-   FileWrite(handle, "Long (Buy) Statistics", "");
-   FileWrite(handle, "Buy SL Count", gblStats.buy.slCount);
-   FileWrite(handle, "Buy SL Gross", gblStats.buy.slGross);
-   FileWrite(handle, "Buy TP Count", gblStats.buy.tpCount);
-   FileWrite(handle, "Buy TP Gross", gblStats.buy.tpGross);
-   FileWrite(handle, "Buy Close Profit Count", gblStats.buy.closeProfitCount);
-   FileWrite(handle, "Buy Close Profit Gross", gblStats.buy.closeProfitGross);
-   FileWrite(handle, "Buy Close Loss Count", gblStats.buy.closeLossCount);
-   FileWrite(handle, "Buy Close Loss Gross", gblStats.buy.closeLossGross);
-
-   FileWrite(handle, "");
-   FileWrite(handle, "Short (Sell) Statistics", "");
-   FileWrite(handle, "Sell SL Count", gblStats.sell.slCount);
-   FileWrite(handle, "Sell SL Gross", gblStats.sell.slGross);
-   FileWrite(handle, "Sell TP Count", gblStats.sell.tpCount);
-   FileWrite(handle, "Sell TP Gross", gblStats.sell.tpGross);
-   FileWrite(handle, "Sell Close Profit Count", gblStats.sell.closeProfitCount);
-   FileWrite(handle, "Sell Close Profit Gross", gblStats.sell.closeProfitGross);
-   FileWrite(handle, "Sell Close Loss Count", gblStats.sell.closeLossCount);
-   FileWrite(handle, "Sell Close Loss Gross", gblStats.sell.closeLossGross);
-
-   FileFlush(handle);
-   FileClose(handle);
-   if(!FileIsExist(filename, FILE_COMMON))
-      Print("Warning: file not found after save: ", filename);
-   Print("Run saved: ", filename, " (ID ", gblRunID, ")");
-   Print("Files folder (Common): ", TerminalInfoString(TERMINAL_COMMONDATA_PATH), "\\Files\\WFO");
-
-   AppendSummaryReport(mode);
   }
 
 //+------------------------------------------------------------------+
@@ -1496,7 +1610,7 @@ double TrimmedProfit()
 //| Gates return 0; everything else stays continuous so the genetic   |
 //| algorithm keeps a gradient to climb.                              |
 //+------------------------------------------------------------------+
-double OnTester()
+double FxCriterion()
   {
    int trades = (int)TesterStatistics(STAT_TRADES);
    if(InpCritMinTrades > 0 && trades < InpCritMinTrades)
@@ -1525,3 +1639,25 @@ double OnTester()
    return (profit / drawdown) * MathSqrt((double)trades);
   }
 //+------------------------------------------------------------------+
+
+//+------------------------------------------------------------------+
+//| CSV export. FxColumns() and FxFill() must stay in the same order. |
+
+//+------------------------------------------------------------------+
+//| Scores the pass, then hands the row to the exporter.             |
+//+------------------------------------------------------------------+
+double OnTester()
+  {
+   double score = FxCriterion();
+
+   double data[];
+   FxFill(data, score);
+
+   string prefix[2];
+   prefix[0] = _Symbol;
+   prefix[1] = EnumToString((ENUM_TIMEFRAMES)Period());
+
+   gExport.WriteRow(prefix, data);
+
+   return score;
+  }
