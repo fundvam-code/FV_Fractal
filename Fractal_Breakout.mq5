@@ -125,7 +125,6 @@ input bool     InpUseSessionFilter        = false;    // Master switch: use sess
 input bool     InpEnableASIA              = true;     // Enable ASIA (00:00-08:00 GMT)
 input bool     InpEnableLONDON            = true;     // Enable LONDON (08:00-16:00 GMT)
 input bool     InpEnableNEWYORK           = true;     // Enable NEWYORK (13:00-21:00 GMT)
-input bool     InpEnableOVERLAP           = true;     // Enable OVERLAP (13:00-16:00 GMT)
 input bool     InpSessionUseServerTime    = true;     // Time source: true=server TimeCurrent(), false=TimeGMT()
 input group    "Trailing Stop"
 input bool     InpUseTrailingStop         = true;     // Use Trailing Stop
@@ -313,7 +312,7 @@ int OnInit()
      }
 
    if(InpUseSessionFilter && !InpEnableASIA && !InpEnableLONDON &&
-      !InpEnableNEWYORK && !InpEnableOVERLAP)
+      !InpEnableNEWYORK)
      {
       Print("Session filter is on but every session is disabled - no entries would be possible");
       return INIT_PARAMETERS_INCORRECT;
@@ -890,7 +889,6 @@ bool CheckSessionFilter()
    if(InpEnableASIA    && minutes >=  0      && minutes <  8 * 60) return true;
    if(InpEnableLONDON  && minutes >=  8 * 60 && minutes < 16 * 60) return true;
    if(InpEnableNEWYORK && minutes >= 13 * 60 && minutes < 21 * 60) return true;
-   if(InpEnableOVERLAP && minutes >= 13 * 60 && minutes < 16 * 60) return true;
    return false;
   }
 
