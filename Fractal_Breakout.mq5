@@ -191,6 +191,11 @@ bool   gblTradingBlocked;
 int      gblTrendDirection;
 datetime gblTrendBar;
 
+//--- Latest trend readings, written into the entry comment for analysis.
+double   gblTrendSlope;
+double   gblTrendR2;
+double   gblTrendEr;
+
 //--- Midnight of the day currently being traded; also the cut-off that keeps
 //--- yesterday's fractals from carrying over into today.
 datetime gblCurrentDay;
@@ -882,7 +887,7 @@ bool OpenTrade(ENUM_POSITION_TYPE posType, MqlTick &curTick)
          if(!CheckMarginForTrade(curTick.ask, lots, ORDER_TYPE_BUY))
             return false;
 
-         if(!Trade.Buy(lots, Symbol(), curTick.ask, sl, tp))
+         if(!Trade.Buy(lots, Symbol(), curTick.ask, sl, tp, TrendComment()))
            {
             Print("Failed to open position: ", Trade.ResultRetcodeDescription());
             return false;
@@ -904,7 +909,7 @@ bool OpenTrade(ENUM_POSITION_TYPE posType, MqlTick &curTick)
          if(!CheckMarginForTrade(curTick.bid, lots, ORDER_TYPE_SELL))
             return false;
 
-         if(!Trade.Sell(lots, Symbol(), curTick.bid, sl, tp))
+         if(!Trade.Sell(lots, Symbol(), curTick.bid, sl, tp, TrendComment()))
            {
             Print("Failed to open position: ", Trade.ResultRetcodeDescription());
             return false;
@@ -1004,6 +1009,9 @@ bool TrendByRegression(int &direction)
 
    double slopeAtr = slope / atr[0];
 
+   gblTrendSlope = slopeAtr;
+   gblTrendR2    = r2;
+
    direction = 0;
    if(MathAbs(slopeAtr) >= InpTrendRegMinSlope && r2 >= InpTrendRegMinR2)
       direction = (slopeAtr > 0) ? 1 : -1;
@@ -1034,6 +1042,8 @@ bool TrendByEfficiency(int &direction)
 
    double ratio = MathAbs(net) / path;
 
+   gblTrendEr = ratio;
+
    direction = 0;
    if(ratio >= InpTrendErMinRatio)
       direction = (net > 0) ? 1 : -1;
@@ -1063,6 +1073,27 @@ void UpdateTrendDirection()
 
    gblTrendDirection = ok ? dir : 0;
    gblTrendBar       = bar;
+
+   if(!ok)
+     {
+      gblTrendSlope = 0;
+      gblTrendR2    = 0;
+      gblTrendEr    = 0;
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| Entry comment with the current trend reading (MT5 limit: 31 chars)|
+//| RG = regression: direction, slope in ATR/bar, R-squared          |
+//| ER = efficiency: direction, efficiency ratio                     |
+//+------------------------------------------------------------------+
+string TrendComment()
+  {
+   if(!InpUseTrendFilter)
+      return "";
+   if(InpTrendMethod == trend_regression)
+      return StringFormat("RG d%+d s%.3f r%.2f", gblTrendDirection, gblTrendSlope, gblTrendR2);
+   return StringFormat("ER d%+d e%.2f", gblTrendDirection, gblTrendEr);
   }
 
 //+------------------------------------------------------------------+
