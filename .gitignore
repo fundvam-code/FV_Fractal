@@ -1,0 +1,5 @@
+# Build artefact, regenerated on every compile
+*.ex5
+
+# Local tooling
+.claude/
